@@ -846,6 +846,7 @@ class SnapshotResource(DojoResource):
     fullname = fields.CharField(attribute='fullname')
     refer = fields.CharField(attribute='refer')
     used = fields.CharField(attribute='used')
+    freenasstate = fields.CharField(attribute='freenasstate') 
     mostrecent = fields.BooleanField(attribute='mostrecent')
     parent_type = fields.CharField(attribute='parent_type')
 

@@ -252,7 +252,7 @@ for snapshot in snapshots_pending_delete:
     output = zfsproc.communicate()[0]
     if output != '':
         fsname, attrname, value, source = output.split('\n')[0].split('\t')
-        if value == '-':
+        if value in ['-', 'REPLICA']:
             snapcmd = '/sbin/zfs destroy -r %s' % (snapshot)
             proc = pipeopen(snapcmd, logger=log)
             err = proc.communicate()[1]
