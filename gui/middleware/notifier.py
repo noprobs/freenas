@@ -72,6 +72,7 @@ os.environ["DJANGO_SETTINGS_MODULE"] = "freenasUI.settings"
 from django.db import models
 from django.db.models import Q
 
+from freenasUI.common import zfs_size_to_bytes 
 from freenasUI.common.acl import ACL_FLAGS_OS_WINDOWS, ACL_WINDOWS_FILE
 from freenasUI.common.freenasacl import ACL, ACL_Hierarchy
 from freenasUI.common.jail import Jls, Jexec
@@ -1391,7 +1392,8 @@ class notifier:
         output = zfsproc.communicate()[0]
         if output != '':
             fsname, attrname, value, source = output.split('\n')[0].split('\t')
-            if value != '-' and value != 'NEW':
+            log.warn ("freenas:state = %s" % (value)) 
+            if value in ('Latest', 'Latest_Replica', 'In_Progress'):
                 return True
         return False
 
@@ -3000,29 +3002,40 @@ class notifier:
         zvols = filter(lambda y: y != '', zfsproc.communicate()[0].split('\n'))
 
         if path:
-            zfsproc = self.__pipeopen("/sbin/zfs list -r -t snapshot -H -S creation %s" % path)
+            zfsproc = self.__pipeopen("/sbin/zfs list -r -t snapshot -H -o name,used,refer,written,freenas:state -S creation %s" % path)
         else:
-            zfsproc = self.__pipeopen("/sbin/zfs list -t snapshot -H -S creation")
+            zfsproc = self.__pipeopen("/sbin/zfs list -t snapshot -H -o name,used,refer,written,freenas:state -S creation")
         lines = zfsproc.communicate()[0].split('\n')
         for line in lines:
             if line != '':
                 list = line.split('\t')
                 snapname = list[0]
                 used = list[1]
-                refer = list[3]
+                refer = list[2]
+                written = list[3]
+                freenasstate = list[4] 
                 fs, name = snapname.split('@')
+                zfssentproc = self.__pipeopen("tail -1 /tmp/zfssendlog-%s | tr -s ' ' | cut -d ' ' -f 2" % (name))
+                zfssent = zfssentproc.communicate()[0] 
                 try:
                     snaplist = fsinfo[fs]
                     mostrecent = False
                 except:
                     snaplist = []
                     mostrecent = True
+
+                if freenasstate == 'IN_PROGRESS' and zfssent != '':
+                    zfssent_pct = 100 * zfs_size_to_bytes(zfssent) / zfs_size_to_bytes(written)
+                    freenasstate = 'IN_PROGRESS (%d%%)' % (zfssent_pct) 
+
                 snaplist.insert(0,
                     zfs.Snapshot(
                         name=name,
                         filesystem=fs,
                         used=used,
                         refer=refer,
+                        written=written,
+                        freenasstate=freenasstate, 
                         mostrecent=mostrecent,
                         parent_type='filesystem' if fs not in zvols else 'volume'
                     ))
@@ -3117,7 +3130,7 @@ class notifier:
             return True, None
         return False, err
 
-    def zfs_inherit_option(self, name, item, recursive=False):
+    def zfs_inherit_option(self, name, item, recursive=False, ssh=''):
         """
         Inherit a ZFS attribute using zfs inherit
 
@@ -3128,18 +3141,20 @@ class notifier:
         """
         name = str(name)
         item = str(item)
+        ssh = str(ssh)
         if recursive:
-            zfscmd = 'zfs inherit -r %s %s' % (item, name)
+            zfscmd = "zfs inherit -r %s %s" % (item, name)
         else:
-            zfscmd = 'zfs inherit %s %s' % (item, name)
-        zfsproc = self.__pipeopen(zfscmd)
+            zfscmd = "zfs inherit %s %s" % (item, name)
+        zfsproc = self.__pipeopen('%s %s' % (ssh, zfscmd))
         err = zfsproc.communicate()[1]
         if zfsproc.returncode == 0:
             return True, None
         return False, err
 
-    def zfs_dataset_release_snapshots(self, name, recursive=False):
+    def zfs_dataset_release_snapshots(self, name, recursive=False, ssh=''):
         name = str(name)
+        ssh = str(ssh)
         retval = None
         if recursive:
             zfscmd = "/sbin/zfs list -Ht snapshot -o name,freenas:state -r %s" % (name)
@@ -3147,14 +3162,14 @@ class notifier:
             zfscmd = "/sbin/zfs list -Ht snapshot -o name,freenas:state -r -d 1 %s" % (name)
         try:
             with mntlock(blocking=False) as MNTLOCK:
-                zfsproc = self.__pipeopen(zfscmd)
+                zfsproc = self.__pipeopen('%s %s' % (ssh, zfscmd))
                 output = zfsproc.communicate()[0]
                 if output != '':
                     snapshots_list = output.splitlines()
                 for snapshot_item in filter(None, snapshots_list):
                     snapshot, state = snapshot_item.split('\t')
                     if state != '-':
-                        self.zfs_inherit_option(snapshot, 'freenas:state')
+                        self.zfs_inherit_option(snapshot, 'freenas:state', ssh)
         except IOError:
             retval = 'Try again later.'
         return retval

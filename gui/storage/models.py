@@ -773,6 +773,13 @@ class ReplRemote(Model):
 
 
 class Replication(Model):
+    repl_enabled = models.BooleanField(
+        default=True,
+        verbose_name=_("Enabled"),
+        help_text=_(
+            "Disabling will stop any new replications being queued. "
+            "It will not stop any queued or in progress replicarions."), 
+    ) 
     repl_filesystem = models.CharField(
         max_length=150,
         verbose_name=_("Filesystem/Volume"),
@@ -809,6 +816,15 @@ class Replication(Model):
             "Initialize remote side for once. (May cause data"
             " loss on remote side!)"),
     )
+    repl_preservefs = models.BooleanField(
+        default=True,
+        verbose_name=_(
+            "Preserve Local Filesystem structure on remote system"),
+        help_text=_(            
+            "If checked LocalPool/Data1/Data2 replicated to RemotePool/Repl results in RemotePool/Repl/Data1/Data2"
+            "Similarly LocalPool ==> RemotePool/Repl "
+            "If not checked would result ==> RemotePool/Repl/Data2 and ==> RemotePool/Repl/LocalPool"),
+    )
     repl_limit = models.IntegerField(
         default=0,
         verbose_name=_("Limit (kB/s)"),
@@ -839,15 +855,42 @@ class Replication(Model):
 
     def delete(self):
         try:
-            if self.repl_lastsnapshot != "":
-                zfsname = self.repl_lastsnapshot.split('@')[0]
-                notifier().zfs_inherit_option(zfsname, 'freenas:state', True)
+             notifier().zfs_dataset_release_snapshots(self.repl_filesystem, False)
+
+             if self.repl_remote.ssh_fast_cipher:
+                 sshcmd = ('/usr/bin/ssh -c arcfour256,arcfour128,blowfish-cbc,'
+                           'aes128-ctr,aes192-ctr,aes256-ctr -i /data/ssh/replication'
+                           ' -o BatchMode=yes -o StrictHostKeyChecking=yes -q')
+             else:
+                 sshcmd = ('/usr/bin/ssh -i /data/ssh/replication -o BatchMode=yes'
+                           ' -o StrictHostKeyChecking=yes -q')
+
+             if self.repl_remote.ssh_remote_dedicateduser_enabled == True:
+                 sshcmd = "%s -l %s" % (
+                     sshcmd,
+                     self.repl_remote.ssh_remote_dedicateduser.encode('utf-8'),
+                 )
+
+             if self.repl_preservefs:
+                 remotefs_final = "%s%s%s" % (self.repl_zfs, self.repl_filesystem.partition('/')[1], self.repl_filesystem.partition('/')[2])
+             else:
+                 remotefs_final = "%s/%s" % (self.repl_zfs, self.repl_filesystem.rpartition('/')[2])
+
+
+             sshpartproc = ('%s -p %d %s' % (sshcmd, self.repl_remote.ssh_remote_port, self.repl_remote.ssh_remote_hostname))
+             log.warn("sshpartproc: %s" % sshpartproc)
+             notifier().zfs_dataset_release_snapshots(remotefs_final, False, sshpartproc)
+
         except:
             pass
         super(Replication, self).delete()
 
 
 class Task(Model):
+    task_enabled = models.BooleanField(
+        default=True,
+        verbose_name=_("Enabled"),
+    ) 
     task_filesystem = models.CharField(
         max_length=150,
         verbose_name=_("Filesystem/Volume"),
