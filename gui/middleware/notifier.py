@@ -3024,9 +3024,9 @@ class notifier:
                     snaplist = []
                     mostrecent = True
 
-                if freenasstate == 'IN_PROGRESS' and zfssent != '':
+                if freenasstate == 'In_Progress' and zfssent != '':
                     zfssent_pct = 100 * zfs_size_to_bytes(zfssent) / zfs_size_to_bytes(written)
-                    freenasstate = 'IN_PROGRESS (%d%%)' % (zfssent_pct) 
+                    freenasstate = 'In_Progress (%d%%)' % (zfssent_pct) 
 
                 snaplist.insert(0,
                     zfs.Snapshot(
