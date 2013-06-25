@@ -3159,7 +3159,7 @@ class notifier:
         if recursive:
             zfscmd = "/sbin/zfs list -Ht snapshot -o name,freenas:state -r %s" % (name)
         else:
-            zfscmd = "/sbin/zfs list -Ht snapshot -o name,freenas:state -r -d 1 %s" % (name)
+            zfscmd = "/sbin/zfs list -Ht snapshot -o name,freenas:state -d 1 %s" % (name)
         try:
             with mntlock(blocking=False) as MNTLOCK:
                 zfsproc = self.__pipeopen('%s %s' % (ssh, zfscmd))

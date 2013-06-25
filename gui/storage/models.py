@@ -855,7 +855,7 @@ class Replication(Model):
 
     def delete(self):
         try:
-             notifier().zfs_dataset_release_snapshots(self.repl_filesystem, False)
+             notifier().zfs_dataset_release_snapshots(self.repl_filesystem, self.repl_userepl)
 
              if self.repl_remote.ssh_fast_cipher:
                  sshcmd = ('/usr/bin/ssh -c arcfour256,arcfour128,blowfish-cbc,'
@@ -864,22 +864,18 @@ class Replication(Model):
              else:
                  sshcmd = ('/usr/bin/ssh -i /data/ssh/replication -o BatchMode=yes'
                            ' -o StrictHostKeyChecking=yes -q')
-
              if self.repl_remote.ssh_remote_dedicateduser_enabled == True:
                  sshcmd = "%s -l %s" % (
                      sshcmd,
                      self.repl_remote.ssh_remote_dedicateduser.encode('utf-8'),
                  )
-
              if self.repl_preservefs:
                  remotefs_final = "%s%s%s" % (self.repl_zfs, self.repl_filesystem.partition('/')[1], self.repl_filesystem.partition('/')[2])
              else:
                  remotefs_final = "%s/%s" % (self.repl_zfs, self.repl_filesystem.rpartition('/')[2])
-
-
              sshpartproc = ('%s -p %d %s' % (sshcmd, self.repl_remote.ssh_remote_port, self.repl_remote.ssh_remote_hostname))
-             log.warn("sshpartproc: %s" % sshpartproc)
-             notifier().zfs_dataset_release_snapshots(remotefs_final, False, sshpartproc)
+
+             notifier().zfs_dataset_release_snapshots(remotefs_final, self.repl_userepl, sshpartproc)
 
         except:
             pass
