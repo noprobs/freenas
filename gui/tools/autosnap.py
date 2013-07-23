@@ -150,9 +150,9 @@ mp_to_task_map = {}
 # Grab all matching tasks into a tree.
 # Since the snapshot we make have the name 'foo@auto-%Y%m%d.%H%M-{expire time}'
 # format, we just keep one task.
-TaskObjects = Task.objects.filter(task_enabled=True)
+TaskObjects = Task.objects.all()
 for task in TaskObjects:
-    if isMatchingTime(task, snaptime):
+    if isMatchingTime(task, snaptime) and task.task_enabled==True:
         fs = task.task_filesystem
         expire_time = ('%s%s' % (task.task_ret_count, task.task_ret_unit[0])).__str__()
         tasklist = []
@@ -192,16 +192,6 @@ for line in lines:
                     else:
                         snapshots[(fs, snap_ret_policy)] = snap_infodict
 
-# Exclude snapshots that have clones associated from being deleted
-if len(snapshots_pending_delete) > 0:
-    snapshots_cloned = set()
-    zfsproc = pipeopen("/sbin/zfs list -H -t filesystem,volume -o origin", debug, logger=log)
-    lines = zfsproc.communicate()[0].split('\n')
-    for snapshot_name in lines:
-        if snapshot_name != '-':
-            snapshots_cloned.add(snapshot_name)
-    snapshots_pending_delete = snapshots_pending_delete.difference(snapshots_cloned)
-
 list_mp = mp_to_task_map.keys()
 
 for mpkey in list_mp:
@@ -231,7 +221,7 @@ for mpkey, tasklist in mp_to_task_map.items():
     snapname = '%s@auto-%s-%s' % (fs, snaptime_str, expire)
 
     # If there is associated replication task, mark the snapshots as 'NEW'.
-    if Replication.objects.filter(repl_filesystem=fs, repl_enabled=True).count() > 0:
+    if Replication.objects.filter(repl_filesystem=fs).filter(repl_enabled=True).count() > 0:
         MNTLOCK.lock()
         snapcmd = '/sbin/zfs snapshot%s -o freenas:state=NEW %s' % (rflag, snapname)
         proc = pipeopen(snapcmd, logger=log)
@@ -252,8 +242,8 @@ for snapshot in snapshots_pending_delete:
     output = zfsproc.communicate()[0]
     if output != '':
         fsname, attrname, value, source = output.split('\n')[0].split('\t')
-        if value == '-':
-            snapcmd = '/sbin/zfs destroy -r %s' % (snapshot)
+        if value in ('-','Replica','Replicated'):
+            snapcmd = '/sbin/zfs destroy -d %s' % (snapshot)
             proc = pipeopen(snapcmd, logger=log)
             err = proc.communicate()[1]
             if proc.returncode != 0:

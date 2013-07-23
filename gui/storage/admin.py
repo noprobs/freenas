@@ -522,7 +522,7 @@ class TaskFAdmin(BaseFreeAdmin):
     def get_datagrid_columns(self):
         columns = super(TaskFAdmin, self).get_datagrid_columns()
         columns.insert(2, {
-            'name': 'when',
+            'name': 'how',
             'label': _('When'),
             'sortable': False,
         })
@@ -531,7 +531,7 @@ class TaskFAdmin(BaseFreeAdmin):
             'name': 'interv',
             'label': _('Frequency'),
             'sortable': False,
-        })
+        }) 
 
         columns.insert(4, {
             'name': 'keepfor',
@@ -553,7 +553,9 @@ class ReplicationFAdmin(BaseFreeAdmin):
         'repl_lastsnapshot',
         'repl_remote',
         'repl_userepl',
+        'repl_recurse',
         'repl_resetonce',
+        'repl_preservefs',
         )
 
     def get_datagrid_columns(self):
