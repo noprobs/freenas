@@ -1700,6 +1700,12 @@ class ReplicationForm(ModelForm):
             'repl_end': forms.widgets.TimeInput(attrs={
                 'constraints': mark_safe("{timePattern:'HH:mm:ss',}"),
             }),
+            'repl_prioritybegin': forms.widgets.TimeInput(attrs={
+                'constraints': mark_safe("{timePattern:'HH:mm:ss',}"),
+            }),
+            'repl_priorityend': forms.widgets.TimeInput(attrs={
+                'constraints': mark_safe("{timePattern:'HH:mm:ss',}"),
+            }),
         }
 
     def __init__(self, *args, **kwargs):
@@ -1718,6 +1724,19 @@ class ReplicationForm(ModelForm):
                     hour=int(search.group("hour")),
                     minute=int(search.group("min")),
                     second=int(search.group("sec")))
+            if "repl_prioritybegin" in new:
+                search = HOUR.search(new['repl_prioritybegin'])
+                new['repl_prioritybegin'] = time(
+                    hour=int(search.group("hour")),
+                    minute=int(search.group("min")),
+                    second=int(search.group("sec")))
+            if "repl_priorityend" in new:
+                search = HOUR.search(new['repl_priorityend'])
+                new['repl_priorityend'] = time(
+                    hour=int(search.group("hour")),
+                    minute=int(search.group("min")),
+                    second=int(search.group("sec")))
+
             args = (new,) + args[1:]
         repl = kwargs.get('instance', None)
         super(ReplicationForm, self).__init__(*args, **kwargs)

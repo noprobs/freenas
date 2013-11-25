@@ -862,21 +862,38 @@ class Replication(Model):
             " loss on remote side!)"),
     )
     repl_limit = models.IntegerField(
-        default=0,
-        verbose_name=_("Limit (kB/s)"),
+        default=-1,
+        verbose_name=_("Default Bandwidth Limit (kB/s)"),
         help_text=_(
-            "Limit the replication speed. Unit in "
-            "kilobytes/seconds. 0 = unlimited."),
+            "Limit the replication speed.  Unit in "
+            "kilobytes/seconds. -1 = no limit"),
     )
     repl_begin = models.TimeField(
         default=time(hour=0),
         verbose_name=_("Begin"),
-        help_text=_("Do not start replication before"),
+        help_text=_("Do not start default replication before"),
     )
     repl_end = models.TimeField(
         default=time(hour=23, minute=59),
         verbose_name=_("End"),
-        help_text=_("Do not start replication after"),
+        help_text=_("Do not start default replication after"),
+    )
+    repl_prioritylimit = models.IntegerField(
+        default=-1,
+        verbose_name=_("Priority Bandwidth Limit (kB/s)"),
+        help_text=_(
+            "Limit the replication speed during limit times. "
+            "Unit in kilobytes/seconds. -1 = no limit"),
+    )
+    repl_prioritybegin = models.TimeField(
+        default=time(hour=0),
+        verbose_name=_("Priority begin"),
+        help_text=_("Start Priority Replication after"),
+    )
+    repl_priorityend = models.TimeField(
+        default=time(hour=23, minute=59),
+        verbose_name=_("Priority end"),
+        help_text=_("Do not start Priority replication after"),
     )
 
     class Meta:
