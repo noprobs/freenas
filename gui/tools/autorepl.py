@@ -25,6 +25,8 @@
 # SUCH DAMAGE.
 #
 
+# NOTE THIS CHANGSET IS TO SHOW THINKING - IT IS NOT TESTED
+
 import datetime
 import logging
 import os
@@ -50,11 +52,12 @@ from freenasUI.common.system import send_mail
 
 # DESIGN NOTES
 #
-# A snapshot transists its state in its lifetime this way:
-#   NEW:                        A newly created snapshot by autosnap
-#   LATEST:                     A snapshot marked to be the latest one
-#   -:                          The replication system no longer cares this.
-#
+# A snapshot can have the following freenas:state values:
+#   Queued          A snapshot which has been queued for replication
+#   In_Progress     A snapshot which is in the process of being replicated
+#   Replicated      A snapshot which has been replicated to a remote system
+#   Failed          A snapshot where replication attempt failed
+#   -               A snapshot which has no involvement in the replication process
 
 log = logging.getLogger('tools.autorepl')
 
@@ -77,7 +80,6 @@ appPool.hook_tool_run('autorepl')
 MNTLOCK = mntlock()
 
 mypid = os.getpid()
-templog = '/tmp/repl-%d' % (mypid)
 
 now = datetime.datetime.now().replace(microsecond=0)
 if now.second < 30 or now.minute == 59:
@@ -113,7 +115,6 @@ MNTLOCK.unlock()
 # At this point, we are sure that only one autorepl instance is running.
 
 log.debug("Autosnap replication started")
-log.debug("temp log file: %s" % (templog, ))
 
 # Traverse all replication tasks
 replication_tasks = Replication.objects.all()
@@ -130,9 +131,9 @@ for replication in replication_tasks:
     dedicateduser = replication.repl_remote.ssh_remote_dedicateduser
     fast_cipher = replication.repl_remote.ssh_fast_cipher
     remotefs = replication.repl_zfs.__str__()
-    localfs = replication.repl_filesystem.__str__()
-    last_snapshot = replication.repl_lastsnapshot.__str__()
+    basefs = replication.repl_filesystem.__str__()
     resetonce = replication.repl_resetonce
+    replcompresss = replication.repl_compression.__str__()
 
     if fast_cipher:
         sshcmd = ('/usr/bin/ssh -c arcfour256,arcfour128,blowfish-cbc,'
@@ -153,193 +154,210 @@ for replication in replication_tasks:
     else:
         Rflag = ''
 
-    wanted_list = []
-    known_latest_snapshot = ''
-    expected_local_snapshot = ''
-
-    localfs_split = localfs.split('/')
-
-    if len(localfs_split) > 1:
-        remotefs_final = "%s/%s" % (remotefs, "/".join(localfs_split[1:]))
-        if len(localfs_split) > 2:
-            remotefs_parent = "%s/%s" % (remotefs, "/".join(localfs_split[1:-1]))
-        else:
-            remotefs_parent = "%s/%s" % (remotefs, localfs_split[1])
+    if replication.repl_recurse:
+       Recurseflag = '-r'
     else:
-        remotefs_final = remotefs
-        remotefs_parent = remotefs
+       Recurseflag = ''
+
+    if replication.repl_preservefs:
+        recvflag = '-d '
+    else:
+        recvflag = '-e '
+
+#TODO Add lZ4 compression option when lz4c executable is available
+    if replcompression == 'gzip':
+        compress = ' | /usr/bin/gzip '
+        decompress = ' /usr/bin/gzcat | '
+    elif replcompress == 'xz':
+        compress = ' | /usr/bin/xz '
+        decompress = ' /usr/bin/xzcat | '
+    else: # default 'off'
+        compress = ''
+        decompress = ''
+
 
     # Test if there is work to do, if so, own them
-    MNTLOCK.lock()
-    log.debug("Checking dataset %s" % (localfs))
-    zfsproc = pipeopen('/sbin/zfs list -Ht snapshot -o name,freenas:state -r -d 1 %s' % (localfs), debug)
-    output, error = zfsproc.communicate()
-    if zfsproc.returncode:
-        log.warn('Could not determine last available snapshot for dataset %s: %s' % (
-            localfs,
-            error,
-            ))
-        MNTLOCK.unlock()
-        continue
-    if output != '':
-        snapshots_list = output.split('\n')
-        snapshots_list.reverse()
-        found_latest = False
-        for snapshot_item in snapshots_list:
-            if snapshot_item != '':
-                snapshot, state = snapshot_item.split('\t')
-                if found_latest:
-                    # assert (known_latest_snapshot != '') because found_latest
-                    if state != '-':
-                        system('/sbin/zfs set freenas:state=NEW %s' % (known_latest_snapshot))
-                        system('/sbin/zfs set freenas:state=LATEST %s' % (snapshot))
-                        wanted_list.insert(0, known_latest_snapshot)
-                        log.debug("Snapshot %s added to wanted list (was LATEST)" % (snapshot))
-                        known_latest_snapshot = snapshot
-                        log.warn("Snapshot %s became latest snapshot" % (snapshot))
-                else:
-                    log.debug("Snapshot: %s State: %s" % (snapshot, state))
-                    if state == 'LATEST' and not resetonce:
-                        found_latest = True
-                        known_latest_snapshot = snapshot
-                        log.debug("Snapshot %s is the recorded latest snapshot" % (snapshot))
-                    elif state == 'NEW' or resetonce:
-                        wanted_list.insert(0, snapshot)
-                        log.debug("Snapshot %s added to wanted list" % (snapshot))
-                    elif state.startswith('INPROGRESS'):
-                        # For compatibility with older versions
-                        wanted_list.insert(0, snapshot)
-                        system('/sbin/zfs set freenas:state=NEW %s' % (snapshot))
-                        log.debug("Snapshot %s added to wanted list (stale)" % (snapshot))
-                    elif state == '-':
-                        # The snapshot is already replicated, or is not
-                        # an automated snapshot.
-                        log.debug("Snapshot %s unwanted" % (snapshot))
-                    else:
-                        # This should be exception but skip for now.
-                        MNTLOCK.unlock()
-                        continue
-    MNTLOCK.unlock()
-
-    # If there is nothing to do, go through next replication entry
-    if len(wanted_list) == 0:
-        continue
-
-    if known_latest_snapshot != '' and not resetonce:
-        # Check if it matches remote snapshot
-        rzfscmd = '"zfs list -Hr -o name -t snapshot -d 1 %s | tail -n 1 | cut -d@ -f2"' % (remotefs_final)
-        sshproc = pipeopen('%s -p %d %s %s' % (sshcmd, remote_port, remote, rzfscmd))
-        output = sshproc.communicate()[0]
-        if output != '':
-            expected_local_snapshot = '%s@%s' % (localfs, output.split('\n')[0])
-            if expected_local_snapshot == last_snapshot:
-                # Accept: remote and local snapshots matches
-                log.debug("Found matching latest snapshot %s remotely" % (last_snapshot))
-            elif expected_local_snapshot == known_latest_snapshot:
-                # Accept
-                log.debug("Found matching latest snapshot %s remotely (but not the recorded one)" % (known_latest_snapshot))
-                last_snapshot = known_latest_snapshot
+    zfsproc = pipeopen('/sbin/zfs list %s -Ho name %s' % (Recurseflag, basefs)) # default order is descending into filesystem from zpool ie Vol1; Vol1/Data1; Vol1/Data1/Data2
+    fs = zfsproc.communicate()[0].split('\n')
+    for localfs in fs:
+        if localfs !='':
+            last_snapshot = ''
+            output = ''
+            remoteoutput = ''
+            error = ''
+            wanted_list = []
+            known_latest_snapshot = ''
+            expected_latest_snapshot = ''
+            expected_local_snapshot = ''
+            replicationfailed = False
+            if replication.repl_preservefs:
+                remotefs_final = "%s%s%s" % (remotefs, localfs.partition('/')[1],localfs.partition('/')[2])
             else:
-                # Do we have it locally? if yes then mark it immediately
-                log.info("Can not locate expected snapshot %s, looking more carefully" % (expected_local_snapshot))
-                MNTLOCK.lock()
-                zfsproc = pipeopen('/sbin/zfs list -Ht snapshot -o name,freenas:state %s' % (expected_local_snapshot), debug)
-                output = zfsproc.communicate()[0]
-                if output != '':
-                    last_snapshot, state = output.split('\n')[0].split('\t')
-                    log.info("Marking %s as latest snapshot" % (last_snapshot))
-                    if state == '-':
-                        system('/sbin/zfs inherit freenas:state %s' % (known_latest_snapshot))
-                        system('/sbin/zfs set freenas:state=LATEST %s' % (last_snapshot))
-                        known_latest_snapshot = last_snapshot
-                else:
-                    log.warn("Can not locate a proper local snapshot for %s" % (localfs))
-                    # Can NOT proceed any further.  Report this situation.
-                    error, errmsg = send_mail(subject="Replication failed!", text=\
+                remotefs_final = "%s/%s" % (remotefs, localfs.rpartition('/')[2])
+
+            MNTLOCK.lock()
+            log.debug("Checking dataset %s" % (localfs))
+            zfsproc = pipeopen('/sbin/zfs list -Ht snapshot -d1 %s' % (localfs), debug)
+            output, error = zfsproc.communicate()
+            if zfsproc.returncode:
+                log.warn('Could not determine local snapshots for dataset %s, error: %s' % (localfs, error))
+                MNTLOCK.unlock()
+                err, errmsg = send_mail(subject="Replication failed!", text=\
+                    """
+Hello,
+
+Could not determine local snapshots for dataset %s
+======================
+%s
+                    """ % (localfs, error), interval=datetime.timedelta(hours=2), channel='autorepl')
+                continue
+
+            if output != '':
+                snapshots_list = output.split('\n')
+                snapshots_list.reverse()
+                if not resetonce:
+                    # Find last snapshot on remote server
+                    rzfscmd = '"zfs list -H -o name -t snapshot -d1 %s | tail -n 1 | cut -d@ -f2"' % (remotefs_final)
+                    sshproc = pipeopen('%s -p %d %s %s' % (sshcmd, remote_port, remote, rzfscmd))
+                    remoteoutput, error = sshproc.communicate()
+                    if sshproc.returncode: # can't find last snapshot, check if remote filesystem is available
+                        rzfscmd = '"zfs list -Ho name %s"' % (remotefs)
+                        sshproc = pipeopen('%s -p %d %s %s' % (sshcmd, remote_port, remote, rzfscmd))
+                        remoteoutput, error = sshproc.communicate()
+                        if sshproc.returncode: # remote filesystem is NOT available
+                            log.warn ("Could not connect to replication filesystem %s on server %s, error: %s" %(remotefs, remote, error))
+                            MNTLOCK.unlock()
+                            err, errmsg = send_mail(subject="Replication failed!", text=\
+                                """
+Hello,
+
+Could not connect to replication filesystem %s on server %s.
+======================
+%s
+                                """ % (remotefs, remote, error), interval=datetime.timedelta(hours=2), channel='autorepl')
+                            continue
+                        else:
+                           expected_latest_snapshot =''
+                    else:
+                        expected_latest_snapshot = '%s@%s' % (localfs, remoteoutput.split('\n')[0])
+
+
+                for snapshot_item in snapshots_list:
+                    if snapshot_item != '':
+                        snapshot, state = snapshot_item.split('\t')
+                        if resetonce:
+                            system('/sbin/zfs set freenas:state=Queued %s' % (snapshot))
+                            system('/sbin/zfs hold repl %s' % (snapshot))
+                            wanted_list.insert(0,snapshot)
+                            log.debug("Snapshot %s added to wanted list" % (snapshot))
+                        elif snapshot == expected_latest_snapshot:
+                            known_latest_snapshot = snapshot
+                            if state != 'Replicated':
+                                system('/sbin/zfs set freenas:state=Replicated %s' % (snapshot))
+                        elif known_latest_snapshot == '':
+                            wanted_list.insert(0,snapshot)
+                            log.debug("Snapshot %s added to wanted list" % (snapshot))
+                        else:
+                            if state != 'Replicated':
+                                system('/sbin/zfs inherit freenas:state %s' % (snapshot))
+                            log.debug("Snapshot %s not needed for replication" % (snapshot))
+
+                if known_latest_snapshot == '' and not resetonce:
+                    log.warn("Latest snapshot %s on remote server is not on local server. Error: %s" % (remoteoutput.split('\n')[0], error))
+                    MNTLOCK.unlock()
+                    err, errmsg = send_mail(subject="Replication failed!", text=\
                         """
 Hello,
-    The replication failed for the local ZFS %s because the remote system
-    have diverged snapshot with us.
-                        """ % (localfs), interval=datetime.timedelta(hours=2), channel='autorepl')
-                    MNTLOCK.unlock()
+
+Latest snapshot %s on remote server %s can not be found on local server.
+======================
+%s
+                        """ % (remoteoutput.split('\n')[0], remote, error), interval=datetime.timedelta(hours=2), channel='autorepl')
                     continue
-                MNTLOCK.unlock()
-        else:
-            log.log(logging.NOTICE, "Can not locate %s on remote system, starting from there" % (known_latest_snapshot))
-            # Reset the "latest" snapshot to a new one.
-            system('/sbin/zfs set freenas:state=NEW %s' % (known_latest_snapshot))
-            wanted_list.insert(0, known_latest_snapshot)
-            last_snapshot = ''
-            known_latest_snapshot = ''
-    if resetonce:
-        log.log(logging.NOTICE, "Destroying remote %s" % (remotefs_final))
-        destroycmd = '%s -p %d %s /sbin/zfs destroy -rRf %s' % (sshcmd, remote_port, remote, remotefs_final)
-        system(destroycmd)
-        known_latest_snapshot = ''
 
-    last_snapshot = known_latest_snapshot
 
-    for snapname in wanted_list:
-        if replication.repl_limit != 0:
-            limit = ' | /usr/local/bin/throttle -K %d' % replication.repl_limit
-        else:
-            limit = ''
-        if last_snapshot == '':
-            replcmd = '(/sbin/zfs send -V %s%s%s | /bin/dd obs=1m | /bin/dd obs=1m | %s -p %d %s "/sbin/zfs receive -F -d %s && echo Succeeded.") > %s 2>&1' % (Rflag, snapname, limit, sshcmd, remote_port, remote, remotefs, templog)
-        else:
-            replcmd = '(/sbin/zfs send -V %s-I %s %s%s | /bin/dd obs=1m | /bin/dd obs=1m | %s -p %d %s "/sbin/zfs receive -F -d %s && echo Succeeded.") > %s 2>&1' % (Rflag, last_snapshot, snapname, limit, sshcmd, remote_port, remote, remotefs, templog)
-        system(replcmd)
-        with open(templog) as f:
-            msg = f.read()
-        os.remove(templog)
-        log.debug("Replication result: %s" % (msg))
+            MNTLOCK.unlock()
 
-        # Determine if the remote side have the snapshot we have now.
-        rzfscmd = '"zfs list -Hr -o name -t snapshot -d 1 %s | tail -n 1 | cut -d@ -f2"' % (remotefs_final)
-        sshproc = pipeopen('%s -p %d %s %s' % (sshcmd, remote_port, remote, rzfscmd))
-        output = sshproc.communicate()[0]
-        if output != '':
-            expected_local_snapshot = '%s@%s' % (localfs, output.split('\n')[0])
-            if expected_local_snapshot == snapname:
-                system('%s -p %d %s "/sbin/zfs inherit -r freenas:state %s"' % (sshcmd, remote_port, remote, remotefs_final))
-                # Replication was successful, mark as such
-                MNTLOCK.lock()
-                if last_snapshot != '':
-                    system('/sbin/zfs inherit freenas:state %s' % (last_snapshot))
-                last_snapshot = snapname
-                system('/sbin/zfs set freenas:state=LATEST %s' % (last_snapshot))
-                MNTLOCK.unlock()
-                replication.repl_lastsnapshot = last_snapshot
-                if resetonce:
-                    replication.repl_resetonce = False
-                replication.save()
+            # If there is nothing to do, go through next replication entry
+            if len(wanted_list) == 0:
                 continue
-            else:
-                log.warn("Remote and local mismatch after replication: %s vs %s" % (expected_local_snapshot, snapname))
-                rzfscmd = '"zfs list -Ho name -t snapshot -d 1 %s | tail -n 1 | cut -d@ -f2"' % (remotefs_final)
+
+            if resetonce:  #TO DO More validation needed here including recurse options and performance do we need to do rm -rf on base fs
+                log.warn("Destroying remote %s snapshots onm remote server %s" % (remotefs_final, remote))
+                known_latest_snapshot = ''
                 sshproc = pipeopen('%s -p %d %s %s' % (sshcmd, remote_port, remote, rzfscmd))
-                output = sshproc.communicate()[0]
+                system ('%s -p %d %s /sbin/zfs list -Ho name -t snapshot -d1 %s | xargs -n1 /sbin/zfs release repl' % (sshcmd, remote_port, remote, remotefs_final)) #Should we check if there is a hold first before release?
+                system ('%s -p %d %s /sbin/zfs list -Ho name -t snapshot -d1 %s | xargs -n1 /sbin/zfs destroy -d' % (sshcmd, remote_port, remote, remotefs_final))
+
+
+            last_snapshot = known_latest_snapshot
+
+            for snapname in wanted_list:
+                zfssendlog = '/tmp/zfssendlog-%s' % (snapname.replace("/","_"))
+                log.debug("Create %s log in tmp for zfs send" % (zfssendlog))
+                if replication.repl_limit != 0:
+                    limit = ' | /usr/local/bin/throttle -K %d' % replication.repl_limit
+                else:
+                    limit = ''
+
+                if last_snapshot == '':
+                    replcmd = '(/sbin/zfs send -V %s%s%s%s | /bin/dd obs=1m | /bin/dd obs=1m | %s -p %d %s "%s/sbin/zfs receive -F %s%s && echo Succeeded.") > %s 2>&1' % (Rflag, snapname, compress, limit, sshcmd, remote_port, remote, decompress, recvflag, remotefs, zfssendlog)
+                else:
+                    replcmd = '(/sbin/zfs send -V %s-I %s %s%s%s | /bin/dd obs=1m | /bin/dd obs=1m | %s -p %d %s "%s/sbin/zfs receive -F %s%s && echo Succeeded.") > %s 2>&1' % (Rflag, last_snapshot, snapname, compress, limit, sshcmd, remote_port, remote, decompress, recvflag, remotefs, zfssendlog)
+
+                system('/sbin/zfs set freenas:state="In_Progress" %s' % (snapname))  #Strictly speaking not needed as can see which snapshot is currently replicating from sendlog and proc list (which also shows % transferred now) but this brings status info together in one field
+                system(replcmd)
+
+                msgproc = pipeopen('tail -n 1 %s' % (zfssendlog))
+                msg = msgproc.communicate()[0]
+                fullmsg = ''
+                if not msg.startswith('Succeeded'):
+                    with open(zfssendlog) as f:
+                        fullmsg = f.read()
+                os.remove(zfssendlog)
+                log.debug("Replication result: %s" % (msg))
+
+                # Determine if the remote side have the snapshot we have now.
+                rzfscmd = '"zfs list -Ho name -t snapshot -d1 %s@%s | cut -d@ -f2"' % (remotefs_final, snapname.split('@')[1])
+                sshproc = pipeopen('%s -p %d %s %s' % (sshcmd, remote_port, remote, rzfscmd))
+                output, error = sshproc.communicate()
+                if sshproc.returncode:
+                    log.warn('Could not determine remote snapshots %s for dataset %s: %s' % (remotefs_final, localfs, error))
+                    system('/sbin/zfs set freenas:state=Failed %s' % (snapname))
+                    replicationfailed = True
                 if output != '':
                     expected_local_snapshot = '%s@%s' % (localfs, output.split('\n')[0])
                     if expected_local_snapshot == snapname:
-                        log.warn("Snapshot %s already exist on remote, marking as such" % (snapname))
-                        system('%s -p %d %s "/sbin/zfs inherit -r freenas:state %s"' % (sshcmd, remote_port, remote, remotefs_final))
                         # Replication was successful, mark as such
                         MNTLOCK.lock()
-                        system('/sbin/zfs inherit freenas:state %s' % (snapname))
+                        if last_snapshot != '':
+                            system('/sbin/zfs release repl %s' % (last_snapshot))
+                            system('%s -p %d %s "/sbin/zfs release repl  %s@%s"' % (sshcmd, remote_port, remote, remotefs_final, last_snapshot.split('@')[1]))
+                        system('/sbin/zfs set freenas:state=Replicated %s' % (snapname))
+                        system('%s -p %d %s "/sbin/zfs hold repl %s@%s"' % (sshcmd, remote_port, remote, remotefs_final, snapname.split('@')[1]))
+                        last_snapshot = snapname
                         MNTLOCK.unlock()
+                        if resetonce:
+                            replication.repl_resetonce = False
                         continue
 
-        # Something wrong, report.
-        log.warn("Replication of %s failed with %s" % (snapname, msg))
-        error, errmsg = send_mail(subject="Replication failed!", text=\
-            """
+                else:
+                    system('/sbin/zfs set freenas:state=Failed %s' % (snapname))
+                    replicationfailed = True
+
+                if replicationfailed == True:
+                    # Something wrong, report.
+                    log.warn("Replication of %s failed with %s" % (snapname, msg))
+                    MNTLOCK.unlock()
+                    error, errmsg = send_mail(subject="Replication failed!", text=\
+                        """
 Hello,
-    The system was unable to replicate snapshot %s to %s
+
+The system was unable to replicate snapshot %s to %s
 ======================
 %s
-            """ % (localfs, remote, msg), interval=datetime.timedelta(hours=2), channel='autorepl')
-        break
+                        """ % (localfs, remote, fullmsg), interval=datetime.timedelta(hours=2), channel='autorepl')
+                    break
 
 os.remove('/var/run/autorepl.pid')
 log.debug("Autosnap replication finished")

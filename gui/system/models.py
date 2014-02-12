@@ -244,6 +244,9 @@ class Advanced(Model):
     adv_anonstats_token = models.TextField(
             blank=True,
             editable=False)
+    adv_autosnapdelifnosnap = models.BooleanField(
+            verbose_name = _("Enable auto snapshot expiration even if new snaps are not being created"),
+            default=False)
     # TODO: need geom_eli in kernel
     #adv_encswap = models.BooleanField(
     #        verbose_name = _("Encrypt swap space"),
